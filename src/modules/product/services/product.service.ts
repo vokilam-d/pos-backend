@@ -1,4 +1,4 @@
-import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Product } from '../schemas/product.schema';
@@ -6,15 +6,25 @@ import { CreateOrUpdateProductDto } from '../dtos/create-or-update-product.dto';
 import { ReorderProductsDto } from '../dtos/reorder-products.dto';
 import { FastifyRequest } from 'fastify';
 import { PhotoUploadService } from '../../photo-upload/services/photo-upload.service';
+import { EventName, EventsService } from '../../global/services/events.service';
+import { Order } from '../../order/schemas/order.schema';
+import { IngredientService } from '../../ingredient/services/ingredient.service';
+import { isCastToObjectIdFailed } from '../../../utils/is-cast-to-object-id-failed.util';
 
 @Injectable()
 export class ProductService implements OnApplicationBootstrap {
+
+  private readonly logger = new Logger(ProductService.name);
+
   constructor(
     @InjectModel(Product.name) private readonly productModel: Model<Product>,
     private readonly photoService: PhotoUploadService,
+    private readonly eventsService: EventsService,
+    private readonly ingredientService: IngredientService,
   ) {}
 
   onApplicationBootstrap(): any {
+    this.eventsService.on(EventName.NewOrder, order => this.onNewOrder(order))
   }
 
   async getAllProducts(): Promise<Product[]> {
@@ -25,8 +35,16 @@ export class ProductService implements OnApplicationBootstrap {
   }
 
   async getProduct(productId: string): Promise<Product> {
-    const product = await this.productModel.findById(productId).exec();
-    return product?.toJSON();
+    try {
+      const product = await this.productModel.findById(productId).exec();
+      return product?.toJSON();
+    } catch (e) {
+      if (isCastToObjectIdFailed(e)) {
+        return null;
+      } else {
+        throw e;
+      }
+    }
   }
 
   async create(productDto: CreateOrUpdateProductDto): Promise<Product> {
@@ -73,5 +91,35 @@ export class ProductService implements OnApplicationBootstrap {
     return products[0]
       ? products[0].sortOrder + 1
       : 0;
+  }
+
+  private async onNewOrder(order: Order): Promise<void> {
+    for (const orderItem of order.orderItems) {
+      const session = await this.productModel.db.startSession();
+      session.startTransaction();
+
+      try {
+        const product = await this.productModel.findById(orderItem.productId, null, { session }).exec();
+        if (!product) {
+          this.logger.warn(`onNewOrder - Could not find product "${orderItem.productId}", orderId=${order._id}`);
+          continue;
+        }
+
+        for (const ingredient of product.ingredients) {
+          await this.ingredientService.changeQty(ingredient.ingredientId, -ingredient.qty, session);
+        }
+
+        product.salesCount += orderItem.qty;
+        await product.save({ session });
+
+      } catch (error) {
+        this.logger.error(`Could not update sales count of product (productId=${orderItem.productId}):`);
+        this.logger.error(error);
+
+        await session.abortTransaction();
+      } finally {
+        await session.endSession();
+      }
+    }
   }
 }

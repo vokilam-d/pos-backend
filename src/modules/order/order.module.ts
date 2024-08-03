@@ -4,7 +4,7 @@ import { OrderController } from './controllers/order.controller';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Order, OrderSchema } from './schemas/order.schema';
 import { ProductModule } from '../product/product.module';
-import { ProductOptionModule } from '../product-option/product-option.module';
+import { IngredientModule } from '../ingredient/ingredient.module';
 
 @Module({
   imports: [
@@ -12,7 +12,7 @@ import { ProductOptionModule } from '../product-option/product-option.module';
       { name: Order.name, schema: OrderSchema, collection: Order.collectionName },
     ]),
     ProductModule,
-    ProductOptionModule,
+    IngredientModule,
   ],
   providers: [OrderService],
   controllers: [OrderController],

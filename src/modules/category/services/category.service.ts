@@ -6,6 +6,7 @@ import { CreateOrUpdateCategoryDto } from '../dtos/create-or-update-category.dto
 import { ReorderCategoriesDto } from '../dtos/reorder-categories.dto';
 import { FastifyRequest } from 'fastify';
 import { PhotoUploadService } from '../../photo-upload/services/photo-upload.service';
+import { isCastToObjectIdFailed } from '../../../utils/is-cast-to-object-id-failed.util';
 
 @Injectable()
 export class CategoryService implements OnApplicationBootstrap {
@@ -25,8 +26,16 @@ export class CategoryService implements OnApplicationBootstrap {
   }
 
   async getCategory(categoryId: string): Promise<Category> {
-    const category = await this.categoryModel.findById(categoryId).exec();
-    return category?.toJSON();
+    try {
+      const category = await this.categoryModel.findById(categoryId).exec();
+      return category?.toJSON();
+    } catch (e) {
+      if (isCastToObjectIdFailed(e)) {
+        return null;
+      } else {
+        throw e;
+      }
+    }
   }
 
   async create(categoryDto: CreateOrUpdateCategoryDto): Promise<Category> {

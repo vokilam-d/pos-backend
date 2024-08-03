@@ -1,19 +1,26 @@
 import { BadRequestException, Injectable, OnApplicationBootstrap } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
+import { InjectModel, Prop } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Order } from '../schemas/order.schema';
 import { CreateOrUpdateOrderDto } from '../dtos/create-or-update-order.dto';
 import { ProductService } from '../../product/services/product.service';
-import { ProductOptionService } from '../../product-option/services/product-option.service';
-import { ProductOptionValue } from '../../product-option/schemas/product-option.schema';
-import { SelectedProductOptionValue } from '../../product/schemas/selected-product-option-value.schema';
+import { EventName, EventsService } from '../../global/services/events.service';
+import { IngredientService } from '../../ingredient/services/ingredient.service';
+import { OrderItemSelectedOptionDto } from '../dtos/order-item-selected-option.dto';
+import { OrderItemSelectedOption } from '../schemas/order-item-selected-option.schema';
+import { OrderItem } from '../schemas/order-item.schema';
+import { OrderItemIngredient } from '../schemas/order-item-ingredient.schema';
+import { SelectedIngredient } from '../../product/schemas/selected-ingredient.schema';
+import { isCastToObjectIdFailed } from '../../../utils/is-cast-to-object-id-failed.util';
 
 @Injectable()
 export class OrderService implements OnApplicationBootstrap {
+
   constructor(
     @InjectModel(Order.name) private readonly orderModel: Model<Order>,
     private readonly productService: ProductService,
-    private readonly productOptionService: ProductOptionService,
+    private readonly ingredientService: IngredientService,
+    private readonly eventsService: EventsService,
   ) {}
 
   onApplicationBootstrap(): any {
@@ -25,64 +32,113 @@ export class OrderService implements OnApplicationBootstrap {
   }
 
   async getOrder(orderId: number): Promise<Order> {
-    const order = await this.orderModel.findById(orderId).exec();
-    return order?.toJSON();
+    try {
+      const order = await this.orderModel.findById(orderId).exec();
+      return order?.toJSON();
+    } catch (e) {
+      if (isCastToObjectIdFailed(e)) {
+        return null;
+      } else {
+        throw e;
+      }
+    }
   }
 
   async create(orderDto: CreateOrUpdateOrderDto): Promise<Order> {
-    for (const orderItem of orderDto.orderItems) {
-      const foundProduct = await this.productService.getProduct(orderItem.productId);
-      if (!foundProduct) {
-        throw new BadRequestException(`Product with ID "${orderItem.productId}" not found`);
+    const ingredients = await this.ingredientService.getAllIngredients();
+    const orderItems: OrderItem[] = [];
+
+    for (const orderItemDto of orderDto.orderItems) {
+      const product = await this.productService.getProduct(orderItemDto.productId);
+      if (!product) {
+        throw new BadRequestException(`Product with ID "${orderItemDto.productId}" not found`);
       }
 
-      for (const selectedOption of orderItem.selectedOptions) {
-        const foundSelectedProductOption = foundProduct.options.find(option => option.optionId === selectedOption.optionId);
-        if (!foundSelectedProductOption) {
-          throw new BadRequestException(`Product option with ID "${selectedOption.optionId}" is not added to product`);
-        }
-        const foundSelectedProductOptionValue = foundSelectedProductOption.optionValues.find(optionValue => {
-          return optionValue.optionValueId === selectedOption.optionValueId;
-        });
-        if (!foundSelectedProductOptionValue) {
-          throw new BadRequestException(`Product option value with ID "${selectedOption.optionId}" is not added to product`);
-        }
-
-        const foundProductOption = await this.productOptionService.getProductOption(selectedOption.optionId);
-        if (!foundProductOption) {
-          throw new BadRequestException(`Product option with ID "${selectedOption.optionId}" does not exist`);
-        }
-        const foundProductOptionValue = foundProductOption.values.find(optionValue => {
-          return optionValue.id === selectedOption.optionValueId;
-        });
-        if (!foundProductOptionValue) {
-          throw new BadRequestException(`Product option value with ID "${selectedOption.optionValueId}" does not exist`);
-        }
-
-        selectedOption.optionName = foundProductOption.name;
-        selectedOption.optionValueName = foundProductOptionValue.name;
-        selectedOption.priceDiff = this.getPriceDiffOfSelectedOptionValue(
-          foundSelectedProductOptionValue,
-          foundProductOptionValue,
-        );
+      if (orderItemDto.selectedOptions.length !== product.options.length) {
+        throw new BadRequestException(`Count of options does not match for product "${product.name}"(${product._id})`);
       }
 
-      orderItem.productName = foundProduct.name;
-      orderItem.photoUrl = foundProduct.photoUrl;
-      orderItem.price = foundProduct.price;
-      orderItem.cost = orderItem.selectedOptions.reduce((acc, option) => acc + option.priceDiff, orderItem.price);
+      const selectedOptions: OrderItemSelectedOption[] = orderItemDto.selectedOptions.map(selectedOption => {
+        const option = product.options.find(option => option.id === selectedOption.optionId);
+        if (!option) {
+          throw new BadRequestException(`No option with ID "${selectedOption.optionId}" in product "${product.name}"(${product._id})`);
+        }
+        const optionValue = option.values.find(optionValue => optionValue.id === selectedOption.optionValueId);
+        if (!optionValue) {
+          throw new BadRequestException(`No option value with ID "${selectedOption.optionId}" in option "${option.name}" in product "${product.name}"(${product._id})`);
+        }
+
+        return {
+          optionId: option.id,
+          optionName: option.name,
+          optionValueId: optionValue.id,
+          optionValueName: optionValue.name,
+        };
+      });
+
+      const variant = product.variants.find(variant => {
+        return variant.selectedOptions.find(productSelectedOption => {
+          return selectedOptions.find(orderItemSelectedOption => {
+            return orderItemSelectedOption.optionId === productSelectedOption.optionId
+              && orderItemSelectedOption.optionValueId === productSelectedOption.optionValueId;
+          });
+        })
+      });
+
+      if (!variant) {
+        throw new BadRequestException(`No such variant exist for product "${product.name}"(${product._id})`);
+      }
+
+      const selectedIngredients: SelectedIngredient[] = [...product.ingredients, ...variant.ingredients];
+
+      const orderItemIngredients: OrderItemIngredient[] = selectedIngredients.map(selectedIngredient => {
+        const ingredient = ingredients.find(ingredient => ingredient._id === selectedIngredient.ingredientId);
+        if (!ingredient) {
+          throw new BadRequestException(`Ingredient with ID "${selectedIngredient.ingredientId}" not found`);
+        }
+
+        return {
+          ingredientId: ingredient._id,
+          name: ingredient.name,
+          price: ingredient.price,
+          unit: ingredient.unit,
+          qty: selectedIngredient.qty,
+          cost: ingredient.price * selectedIngredient.qty,
+        };
+      });
+
+      const primeCost = orderItemIngredients.reduce((acc, ing) => acc + ing.cost, 0);
+      const price = primeCost * (variant.markupPercent / 100);
+      const profit = price - primeCost;
+
+      orderItems.push({
+        productId: product._id,
+        name: product.name,
+        photoUrl: product.photoUrl,
+        selectedOptions: selectedOptions,
+        ingredients: orderItemIngredients,
+        primeCost: primeCost,
+        markupPercent: variant.markupPercent,
+        price: price,
+        profit: profit,
+        qty: orderItemDto.qty,
+        totalPrice: price * orderItemDto.qty,
+        totalProfit: profit * orderItemDto.qty,
+      });
     }
 
-    const id = await this.getHighestOrderId();
-    const totalCost = orderDto.orderItems.reduce((acc, item) => acc + item.cost, 0);
-    const createdAtIso = orderDto.createdAtIso || new Date().toISOString();
+    const orderDocContents: Order = {
+      _id: await this.getHighestOrderId(),
+      createdAtIso: orderDto.createdAtIso || new Date().toISOString(),
+      paymentType: orderDto.paymentType,
+      orderItems: orderItems,
+      totalPrice: orderItems.reduce((acc, item) => acc + item.totalPrice, 0),
+      totalProfit: orderItems.reduce((acc, item) => acc + item.totalProfit, 0),
+    };
 
-    const order = await this.orderModel.create({
-      ...orderDto,
-      _id: id,
-      totalCost: totalCost,
-      createdAtIso: createdAtIso,
-    });
+    const order = await this.orderModel.create(orderDocContents);
+
+    this.eventsService.emit(EventName.NewOrder, order.toJSON());
 
     return order.toJSON();
   }
@@ -90,15 +146,6 @@ export class OrderService implements OnApplicationBootstrap {
   async deleteOrder(orderId: string): Promise<Order> {
     const order = await this.orderModel.findByIdAndDelete(orderId).exec();
     return order?.toJSON();
-  }
-
-  private getPriceDiffOfSelectedOptionValue(
-    selectedProductOptionValue: SelectedProductOptionValue,
-    productOptionValue: ProductOptionValue,
-  ) {
-    return selectedProductOptionValue.isPriceDiffOverridden
-      ? selectedProductOptionValue.priceDiff
-      : productOptionValue.priceDiff;
   }
 
   private async getHighestOrderId(): Promise<number> {

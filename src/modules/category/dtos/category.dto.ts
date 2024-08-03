@@ -1,9 +1,13 @@
 import { Category } from '../schemas/category.schema';
 import { CreateOrUpdateCategoryDto } from './create-or-update-category.dto';
-import { Expose, Transform } from 'class-transformer';
+import { Exclude, Expose } from 'class-transformer';
+import { TransformGetId } from '../../../utils/transform-get-id.decorator';
 
 export class CategoryDto extends CreateOrUpdateCategoryDto implements Category {
+  @Exclude()
+  _id: string;
+
   @Expose()
-  @Transform(({ obj }) => obj._id?.toString())
+  @TransformGetId()
   id: string;
 }

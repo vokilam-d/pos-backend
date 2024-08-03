@@ -11,14 +11,17 @@ export class Order {
   @Prop({ required: true })
   createdAtIso: string;
 
-  @Prop({ type: [OrderItem], default: [] })
-  orderItems: OrderItem[];
-
   @Prop({ required: true, enum: PaymentType })
   paymentType: PaymentType;
 
+  @Prop({ type: [OrderItem], default: [] })
+  orderItems: OrderItem[];
+
   @Prop({ required: true })
-  totalCost: number;
+  totalPrice: number;
+
+  @Prop({ required: true })
+  totalProfit: number;
 
   static collectionName = 'orders';
 }

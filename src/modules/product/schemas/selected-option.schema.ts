@@ -1,17 +1,10 @@
 import { Prop, Schema } from '@nestjs/mongoose';
 
-
 @Schema()
-export class OrderItemSelectedOption {
+export class SelectedOption {
   @Prop({ required: true })
   optionId: string;
 
   @Prop({ required: true })
-  optionName: string;
-
-  @Prop({ required: true })
   optionValueId: string;
-
-  @Prop({ required: true })
-  optionValueName: string;
 }
